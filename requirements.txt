@@ -1,0 +1,22 @@
+# Core requirements
+openai>=1.0.0
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# API Clients
+# Note: elevenlabs library not used directly, we use requests instead
+
+# Database & Data Handling
+sqlite3-utils>=0.1
+
+# CLI & Utilities
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+argparse>=1.4.0
+
+# Testing
+pytest>=7.4.0
+
+# Logging
+colorlog>=6.7.0 
