@@ -1,238 +1,247 @@
 #!/usr/bin/env python3
 """
-Statistics Data Access Object
-Provides database operations for analytics statistics.
+Data Access Object (DAO) for analytics statistics.
+Provides database operations for storing and retrieving analytics statistics.
 """
 
+import sqlite3
 import logging
+import json
 from typing import List, Dict, Any, Optional
+import os
 from datetime import datetime
 
-from dao.base_dao import BaseDAO
-from utils.error.error_handler import DatabaseError, exception_mapper
-
-# Configure logging
 logger = logging.getLogger(__name__)
 
-class StatsDAO(BaseDAO):
-    """Data Access Object for statistics operations"""
+class StatsDAO:
+    """DAO for analysis_stats table"""
     
     TABLE_NAME = "analysis_stats"
     
-    def save_stats(self, stats: Dict[str, Any]) -> bool:
+    def __init__(self, db_path: str):
         """
-        Save analysis run statistics
+        Initialize with database path
         
         Args:
-            stats: Dictionary of statistics to save
+            db_path: Path to SQLite database
+        """
+        self.db_path = db_path
+        
+        if not os.path.exists(os.path.dirname(self.db_path)):
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+    
+    def _get_connection(self) -> sqlite3.Connection:
+        """
+        Get a database connection
+        
+        Returns:
+            SQLite connection
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+    
+    def save_stats(self, stats_data: Dict[str, Any]) -> bool:
+        """
+        Save statistics to the database
+        
+        Args:
+            stats_data: Statistics data
             
         Returns:
-            True if successful, False otherwise
+            Success flag
         """
+        conn = None
         try:
-            # If run_date not provided, use current timestamp
-            if 'run_date' not in stats:
-                stats['run_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-            # Build query dynamically
-            fields = []
-            placeholders = []
-            values = []
+            conn = self._get_connection()
+            cursor = conn.cursor()
             
-            for field, value in stats.items():
-                fields.append(field)
-                placeholders.append('?')
-                values.append(value)
+            # Ensure run_date is present
+            if "run_date" not in stats_data:
+                stats_data["run_date"] = datetime.now().isoformat()
             
-            fields_str = ', '.join(fields)
-            placeholders_str = ', '.join(placeholders)
+            # Build query dynamically based on the provided fields
+            fields = list(stats_data.keys())
+            placeholders = ", ".join(["?"] * len(fields))
             
-            # Insert into analysis_stats table
-            query = """
-            INSERT INTO {} ({})
-            VALUES ({})
-            """.format(self.TABLE_NAME, fields_str, placeholders_str)
+            query = f"INSERT INTO {self.TABLE_NAME} ({', '.join(fields)}) VALUES ({placeholders})"
             
-            self.execute_update(query, tuple(values))
-            logger.info("Saved analysis run statistics")
+            values = [stats_data[field] for field in fields]
+            
+            cursor.execute(query, values)
+            conn.commit()
+            
+            logger.info(f"Saved statistics for run on {stats_data.get('run_date')}")
             return True
-                
+            
         except Exception as e:
-            logger.error("Error saving analysis statistics: {}".format(str(e)))
-            raise DatabaseError("Error saving analysis statistics: {}".format(str(e)))
+            logger.error(f"Error saving statistics: {str(e)}")
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if conn:
+                conn.close()
     
-    def get_recent_runs(self, limit: int = 5) -> List[Dict[str, Any]]:
+    def get_recent_runs(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        Get information about recent analysis runs
+        Get recent analysis runs
         
         Args:
-            limit: Maximum number of runs to return
+            limit: Maximum number of records to return
             
         Returns:
             List of recent run statistics
         """
+        conn = None
         try:
-            query = """
-            SELECT * FROM {}
-            ORDER BY run_date DESC
-            LIMIT {}
-            """.format(self.TABLE_NAME, limit)
+            conn = self._get_connection()
+            cursor = conn.cursor()
             
-            return self.execute_query(query)
-                
+            query = f"SELECT * FROM {self.TABLE_NAME} ORDER BY run_date DESC LIMIT ?"
+            
+            cursor.execute(query, (limit,))
+            
+            return [dict(row) for row in cursor.fetchall()]
+            
         except Exception as e:
-            logger.error("Error getting recent runs: {}".format(str(e)))
-            raise DatabaseError("Error getting recent runs: {}".format(str(e)))
+            logger.error(f"Error retrieving recent runs: {str(e)}")
+            return []
+        finally:
+            if conn:
+                conn.close()
     
     def get_summary_stats(self) -> Dict[str, Any]:
         """
-        Get summary statistics across the system
+        Get summary statistics
         
         Returns:
-            Dictionary of statistics
+            Dictionary of summary statistics
         """
+        conn = None
         try:
-            stats = {}
+            conn = self._get_connection()
+            cursor = conn.cursor()
             
-            # Total transcriptions
-            transcriptions_query = "SELECT COUNT(*) as count FROM transcriptions"
-            transcriptions_result = self.execute_query(transcriptions_query)
-            stats['total_transcriptions'] = transcriptions_result[0]['count'] if transcriptions_result else 0
+            summary = {}
             
-            # Total analyzed calls
-            analyzed_query = "SELECT COUNT(*) as count FROM analysis_results"
-            analyzed_result = self.execute_query(analyzed_query)
-            stats['total_analyzed'] = analyzed_result[0]['count'] if analyzed_result else 0
+            # Last run info
+            cursor.execute(f"SELECT * FROM {self.TABLE_NAME} ORDER BY run_date DESC LIMIT 1")
+            last_run = cursor.fetchone()
+            if last_run:
+                summary["last_run"] = dict(last_run)
             
-            # Completed analyses
-            completed_query = "SELECT COUNT(*) as count FROM analysis_results WHERE analysis_status = 'completed'"
-            completed_result = self.execute_query(completed_query)
-            stats['completed_analyses'] = completed_result[0]['count'] if completed_result else 0
+            # Total runs
+            cursor.execute(f"SELECT COUNT(*) FROM {self.TABLE_NAME}")
+            summary["total_runs"] = cursor.fetchone()[0]
             
-            # Failed analyses
-            failed_query = "SELECT COUNT(*) as count FROM analysis_results WHERE analysis_status = 'failed'"
-            failed_result = self.execute_query(failed_query)
-            stats['failed_analyses'] = failed_result[0]['count'] if failed_result else 0
+            # Total processed
+            cursor.execute(f"SELECT SUM(total_processed) FROM {self.TABLE_NAME}")
+            summary["total_processed"] = cursor.fetchone()[0] or 0
             
-            # Average confidence score
-            confidence_query = "SELECT AVG(confidence_score) as avg FROM analysis_results"
-            confidence_result = self.execute_query(confidence_query)
-            stats['avg_confidence'] = confidence_result[0]['avg'] if confidence_result else 0
+            # Total successful
+            cursor.execute(f"SELECT SUM(successful) FROM {self.TABLE_NAME}")
+            summary["total_successful"] = cursor.fetchone()[0] or 0
+            
+            # Total failed
+            cursor.execute(f"SELECT SUM(failed) FROM {self.TABLE_NAME}")
+            summary["total_failed"] = cursor.fetchone()[0] or 0
             
             # Average processing time
-            time_query = "SELECT AVG(processing_time_ms) as avg FROM analysis_results"
-            time_result = self.execute_query(time_query)
-            stats['avg_processing_time'] = time_result[0]['avg'] if time_result else 0
+            cursor.execute(f"SELECT AVG(avg_processing_time) FROM {self.TABLE_NAME} WHERE avg_processing_time IS NOT NULL")
+            summary["avg_processing_time"] = cursor.fetchone()[0] or 0
             
-            # Primary issue category breakdown
-            category_query = """
-            SELECT primary_issue_category, COUNT(*) as count 
-            FROM analysis_results 
-            WHERE primary_issue_category IS NOT NULL 
-            GROUP BY primary_issue_category
-            ORDER BY count DESC
-            """
-            stats['issue_categories'] = self.execute_query(category_query)
+            # Average success rate
+            if summary["total_processed"] > 0:
+                summary["success_rate"] = (summary["total_successful"] / summary["total_processed"]) * 100
+            else:
+                summary["success_rate"] = 0
             
-            # Issue severity breakdown
-            severity_query = """
-            SELECT issue_severity, COUNT(*) as count 
-            FROM analysis_results 
-            WHERE issue_severity IS NOT NULL 
-            GROUP BY issue_severity
-            ORDER BY count DESC
-            """
-            stats['issue_severity'] = self.execute_query(severity_query)
+            # Total run time
+            cursor.execute(f"SELECT SUM(run_duration_seconds) FROM {self.TABLE_NAME} WHERE run_duration_seconds IS NOT NULL")
+            summary["total_run_time"] = cursor.fetchone()[0] or 0
             
-            # Analysis over time
-            time_trend_query = """
-            SELECT DATE(analysis_timestamp) as date, COUNT(*) as count
-            FROM analysis_results
-            GROUP BY DATE(analysis_timestamp)
-            ORDER BY date DESC
-            LIMIT 30
-            """
-            stats['analysis_trend'] = self.execute_query(time_trend_query)
+            return summary
             
-            # Average stats from all runs
-            runs_query = """
-            SELECT 
-                AVG(total_processed) as avg_processed,
-                AVG(avg_confidence) as avg_confidence,
-                AVG(avg_processing_time) as avg_processing_time,
-                SUM(total_tokens) as total_tokens,
-                SUM(total_cost) as total_cost
-            FROM {}
-            """.format(self.TABLE_NAME)
-            runs_result = self.execute_query(runs_query)
-            
-            if runs_result:
-                stats.update(runs_result[0])
-            
-            return stats
-                
         except Exception as e:
-            logger.error("Error getting summary statistics: {}".format(str(e)))
-            raise DatabaseError("Error getting summary statistics: {}".format(str(e)))
+            logger.error(f"Error retrieving summary statistics: {str(e)}")
+            return {}
+        finally:
+            if conn:
+                conn.close()
     
-    def get_performance_stats(self, days: int = 30) -> Dict[str, Any]:
+    def get_performance_stats(self, start_date: str = None, end_date: str = None) -> Dict[str, Any]:
         """
-        Get performance statistics for a specific time period
+        Get performance statistics over time
         
         Args:
-            days: Number of days to look back
+            start_date: Start date in ISO format
+            end_date: End date in ISO format
             
         Returns:
             Dictionary of performance statistics
         """
+        conn = None
         try:
-            stats = {}
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            performance = {}
+            
+            # Build query with optional date range
+            where_clause = ""
+            params = []
+            
+            if start_date:
+                where_clause = " WHERE run_date >= ?"
+                params.append(start_date)
+                
+                if end_date:
+                    where_clause += " AND run_date <= ?"
+                    params.append(end_date)
+            elif end_date:
+                where_clause = " WHERE run_date <= ?"
+                params.append(end_date)
+            
+            # Get all runs in date range
+            query = f"SELECT * FROM {self.TABLE_NAME}{where_clause} ORDER BY run_date"
+            
+            cursor.execute(query, params)
+            runs = [dict(row) for row in cursor.fetchall()]
+            
+            if not runs:
+                return {"message": "No data available for the specified date range"}
+            
+            # Calculate trends
+            performance["runs"] = runs
+            performance["total_runs"] = len(runs)
             
             # Processing time trend
-            time_query = """
-            SELECT 
-                DATE(analysis_timestamp) as date, 
-                AVG(processing_time_ms) as avg_time,
-                COUNT(*) as count
-            FROM analysis_results
-            WHERE analysis_timestamp >= date('now', '-{} days')
-            GROUP BY DATE(analysis_timestamp)
-            ORDER BY date
-            """.format(days)
+            performance["processing_time_trend"] = [
+                {"date": run["run_date"], "avg_processing_time": run["avg_processing_time"]}
+                for run in runs if "avg_processing_time" in run and run["avg_processing_time"] is not None
+            ]
             
-            stats['processing_time_trend'] = self.execute_query(time_query)
+            # Success rate trend
+            performance["success_rate_trend"] = [
+                {
+                    "date": run["run_date"], 
+                    "success_rate": (run["successful"] / run["total_processed"]) * 100 if run["total_processed"] > 0 else 0
+                }
+                for run in runs if "successful" in run and "total_processed" in run
+            ]
             
-            # Confidence score trend
-            confidence_query = """
-            SELECT 
-                DATE(analysis_timestamp) as date, 
-                AVG(confidence_score) as avg_confidence,
-                COUNT(*) as count
-            FROM analysis_results
-            WHERE analysis_timestamp >= date('now', '-{} days')
-            GROUP BY DATE(analysis_timestamp)
-            ORDER BY date
-            """.format(days)
+            # Duration trend
+            performance["duration_trend"] = [
+                {"date": run["run_date"], "duration": run["run_duration_seconds"]}
+                for run in runs if "run_duration_seconds" in run and run["run_duration_seconds"] is not None
+            ]
             
-            stats['confidence_trend'] = self.execute_query(confidence_query)
+            return performance
             
-            # Error rate trend
-            error_query = """
-            SELECT 
-                DATE(analysis_timestamp) as date, 
-                SUM(CASE WHEN analysis_status = 'failed' THEN 1 ELSE 0 END) as failed_count,
-                COUNT(*) as total_count,
-                (CAST(SUM(CASE WHEN analysis_status = 'failed' THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*)) as error_rate
-            FROM analysis_results
-            WHERE analysis_timestamp >= date('now', '-{} days')
-            GROUP BY DATE(analysis_timestamp)
-            ORDER BY date
-            """.format(days)
-            
-            stats['error_trend'] = self.execute_query(error_query)
-            
-            return stats
-                
         except Exception as e:
-            logger.error("Error getting performance statistics: {}".format(str(e)))
-            raise DatabaseError("Error getting performance statistics: {}".format(str(e))) 
+            logger.error(f"Error retrieving performance statistics: {str(e)}")
+            return {"error": str(e)}
+        finally:
+            if conn:
+                conn.close() 
